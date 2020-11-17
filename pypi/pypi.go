@@ -1,12 +1,19 @@
 package pypi
 
 import (
+	"archive/tar"
+	"archive/zip"
+	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/cavaliercoder/grab"
@@ -88,7 +95,7 @@ func NewPackageIndex(url string) *PackageIndex {
 }
 
 func (p *Package) GetWheelByVersion(version string) (wheel Release) {
-    for _, release := range p.Releases[version] {
+	for _, release := range p.Releases[version] {
 		log.Printf("v%s: %s", version, release.PackageType)
 		if release.PackageType == "bdist_wheel" {
 			wheel = release
@@ -98,7 +105,7 @@ func (p *Package) GetWheelByVersion(version string) (wheel Release) {
 }
 
 func (p *Package) GetSdistByVersion(version string) (sdist Release) {
-    for _, release := range p.Releases[version] {
+	for _, release := range p.Releases[version] {
 		if release.PackageType == "sdist" {
 			sdist = release
 		}
@@ -142,7 +149,6 @@ func (p *PackageIndex) GetRelease(projectName string, version string) (pkg Packa
 	pkg, err = p.packageReq(endpoint)
 	return pkg, nil
 }
-
 
 func downloadReleaseFile(dst, url string) error {
 	client := grab.NewClient()
@@ -209,4 +215,178 @@ func (p *PackageIndex) DownloadRelease(dst, projectName string, version string) 
 	}
 	err = downloadReleaseFile(dst, release.Url)
 	return release.Filename, err
+}
+
+func (p *PackageIndex) DownloadFromRequirementsFile(dst, filename string) (reqs []Requirement, err error) {
+	reqs, err = ParseRequirements(filename)
+	for _, req := range reqs {
+		if req.Specification.Comparison == "==" {
+			log.Printf("about to download: %s", req.Name)
+			filename, err = p.DownloadRelease(dst, req.Name, req.Specification.Version)
+			if err != nil {
+				return reqs, err
+			}
+			extension := filepath.Ext(filename)
+			if extension == ".gz" {
+				r, err := os.Open(filepath.Join(dst, filename))
+				if err != nil {
+					return reqs, fmt.Errorf("error opening file at: %s", filepath.Join(dst, filename))
+				}
+				err = Untar(dst, r)
+				if err != nil {
+					return reqs, fmt.Errorf("error extracting requirement file %s: %s", filename, err)
+				}
+				extractDir := strings.ReplaceAll(filename, ".tar.gz", "")
+				oldLocation := filepath.Join(dst, extractDir, req.Name)
+				newLocation := filepath.Join(dst, req.Name)
+				err = os.Rename(oldLocation, newLocation)
+				if err != nil {
+					return reqs, fmt.Errorf("error moving module directory after extracting %s: %s", filename, err)
+				}
+			} else {
+				log.Printf("about to unzip: %s", filename)
+				files, err := Unzip(filepath.Join(dst, filename), dst)
+				if err != nil {
+					return reqs, fmt.Errorf("error unzipping requirement file %s: %s", filename, err)
+				}
+				log.Printf("unzipped:\n" + strings.Join(files, "\n"))
+
+			}
+			// TODO: remove file after unzipping?
+			log.Printf("about to unlink: %s", filepath.Join(dst, filename))
+			err = os.Remove(filepath.Join(dst, filename))
+			if err != nil {
+				return reqs, fmt.Errorf("error removing unzipped requirement file %s: %s", filename, err)
+			}
+
+		} else {
+			log.Panicf("unsure how to deal with this dude: %+v", req)
+		}
+	}
+	return reqs, err
+}
+
+// Untar takes a destination path and a reader; a tar reader loops over the tarfile
+// creating the file structure at 'dst' along the way, and writing any files
+func Untar(dst string, r io.Reader) error {
+
+	gzr, err := gzip.NewReader(r)
+	if err != nil {
+		return err
+	}
+	defer gzr.Close()
+
+	tr := tar.NewReader(gzr)
+
+	for {
+		header, err := tr.Next()
+
+		switch {
+
+		// if no more files are found return
+		case err == io.EOF:
+			return nil
+
+		// return any other error
+		case err != nil:
+			return err
+
+		// if the header is nil, just skip it (not sure how this happens)
+		case header == nil:
+			continue
+		}
+
+		// the target location where the dir/file should be created
+		target := filepath.Join(dst, header.Name)
+
+		// the following switch could also be done using fi.Mode(), not sure if there
+		// a benefit of using one vs. the other.
+		// fi := header.FileInfo()
+
+		// check the file type
+		switch header.Typeflag {
+
+		// if its a dir and it doesn't exist create it
+		case tar.TypeDir:
+			if _, err := os.Stat(target); err != nil {
+				if err := os.MkdirAll(target, 0755); err != nil {
+					return err
+				}
+			}
+
+		// if it's a file create it
+		case tar.TypeReg:
+			f, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR, os.FileMode(header.Mode))
+			if err != nil {
+				return err
+			}
+
+			// copy over contents
+			if _, err := io.Copy(f, tr); err != nil {
+				return err
+			}
+
+			// manually close here after each file operation; defering would cause each file close
+			// to wait until all operations have completed.
+			f.Close()
+		}
+	}
+}
+
+// Unzip will decompress a zip archive, moving all files and folders
+// within the zip file (parameter 1) to an output directory (parameter 2).
+func Unzip(src string, dest string) ([]string, error) {
+
+	var filenames []string
+
+	r, err := zip.OpenReader(src)
+	if err != nil {
+		return filenames, err
+	}
+	defer r.Close()
+
+	for _, f := range r.File {
+
+		// Store filename/path for returning and using later on
+		fpath := filepath.Join(dest, f.Name)
+
+		// Check for ZipSlip. More Info: http://bit.ly/2MsjAWE
+		// if !strings.HasPrefix(fpath, filepath.Clean(dest)+string(os.PathSeparator)) {
+		//     return filenames, fmt.Errorf("%s: illegal file path", fpath)
+		// }
+
+		filenames = append(filenames, fpath)
+
+		if f.FileInfo().IsDir() {
+			// Make Folder
+			os.MkdirAll(fpath, os.ModePerm)
+			continue
+		}
+
+		// Make File
+		if err = os.MkdirAll(filepath.Dir(fpath), os.ModePerm); err != nil {
+			return filenames, err
+		}
+
+		outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
+		if err != nil {
+			return filenames, err
+		}
+
+		rc, err := f.Open()
+		if err != nil {
+			return filenames, err
+		}
+
+		_, err = io.Copy(outFile, rc)
+
+		// Close the file without defer to close before next iteration of loop
+		outFile.Close()
+		rc.Close()
+
+		if err != nil {
+			return filenames, err
+		}
+	}
+	return filenames, nil
 }
