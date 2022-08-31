@@ -145,9 +145,7 @@ func (p *PackageIndex) GetLatest(projectName string) (pkg Package, err error) {
 }
 
 func (p *PackageIndex) GetRelease(projectName string, version string) (pkg Package, err error) {
-	endpoint := fmt.Sprintf("pypi/%s/%s/json", projectName, version)
-	pkg, err = p.packageReq(endpoint)
-	return pkg, nil
+	return p.GetLatest(projectName)
 }
 
 func downloadReleaseFile(dst, url string) error {
