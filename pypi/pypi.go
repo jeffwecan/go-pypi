@@ -228,6 +228,7 @@ func (p *PackageIndex) DownloadFromRequirementsFile(dst, filename string) (reqs 
 			var extractedFiles []string
 
 			if extension == ".gz" {
+				log.Printf("about to untar: %s", filename)
 				r, err := os.Open(filepath.Join(dst, filename))
 				if err != nil {
 					return reqs, fmt.Errorf("error opening file at: %s", filepath.Join(dst, filename))
@@ -236,7 +237,7 @@ func (p *PackageIndex) DownloadFromRequirementsFile(dst, filename string) (reqs 
 				if err != nil {
 					return reqs, fmt.Errorf("error extracting requirement file %s: %s", filename, err)
 				}
-				fmt.Printf("untar of %s files: %+v", filename, extractedFiles)
+				// fmt.Printf("untar of %s files: %+v", filename, extractedFiles)
 
 			} else {
 				log.Printf("about to unzip: %s", filename)
@@ -244,7 +245,7 @@ func (p *PackageIndex) DownloadFromRequirementsFile(dst, filename string) (reqs 
 				if err != nil {
 					return reqs, fmt.Errorf("error unzipping requirement file %s: %s", filename, err)
 				}
-				log.Printf("unzipped:\n" + strings.Join(extractedFiles, "\n"))
+				// log.Printf("unzipped:\n" + strings.Join(extractedFiles, "\n"))
 
 			}
 
@@ -253,14 +254,20 @@ func (p *PackageIndex) DownloadFromRequirementsFile(dst, filename string) (reqs 
 				oldLocation := extractedFile
 				newLocation := strings.ReplaceAll(oldLocation, extractDirName, "")
 				log.Printf("mv %s ==> %s", oldLocation, newLocation)
+				if oldLocation == newLocation {
+					log.Printf("not moving this deal: old path (%s) == new path (%s)", oldLocation, newLocation)
+					continue
+				}
 				if _, err := os.Stat(newLocation); err == nil {
 					fmt.Printf("Not moving %s; already present at: %s", oldLocation, newLocation)
 				} else if errors.Is(err, os.ErrNotExist) {
 					err = os.Rename(oldLocation, newLocation)
 					// if  .
-					if err != nil && ! os.IsExist(err) {
+					if err != nil && !os.IsExist(err) {
 						return reqs, fmt.Errorf("error moving module directory after extracting %s: %s", filename, err)
 					}
+				} else {
+					log.Printf("not moving this deal: %s", newLocation)
 				}
 
 			}
@@ -339,7 +346,7 @@ func Untar(dst string, r io.Reader) ([]string, error) {
 			f.Close()
 		}
 	}
-	return filenames, nil
+	// return filenames, nil
 }
 
 // Unzip will decompress a zip archive, moving all files and folders
