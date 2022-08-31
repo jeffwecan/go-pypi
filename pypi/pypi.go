@@ -225,36 +225,44 @@ func (p *PackageIndex) DownloadFromRequirementsFile(dst, filename string) (reqs 
 				return reqs, err
 			}
 			extension := filepath.Ext(filename)
+			var extractedFiles []string
+
 			if extension == ".gz" {
 				r, err := os.Open(filepath.Join(dst, filename))
 				if err != nil {
 					return reqs, fmt.Errorf("error opening file at: %s", filepath.Join(dst, filename))
 				}
-				err = Untar(dst, r)
+				extractedFiles, err = Untar(dst, r)
 				if err != nil {
 					return reqs, fmt.Errorf("error extracting requirement file %s: %s", filename, err)
 				}
-				extractDir := strings.ReplaceAll(filename, ".tar.gz", "")
-				oldLocation := filepath.Join(dst, extractDir, req.Name)
-				newLocation := filepath.Join(dst, req.Name)
-				err = os.Rename(oldLocation, newLocation)
-				if err != nil {
-					return reqs, fmt.Errorf("error moving module directory after extracting %s: %s", filename, err)
-				}
+				fmt.Printf("untar of %s files: %+v", filename, extractedFiles)
+
 			} else {
 				log.Printf("about to unzip: %s", filename)
-				files, err := Unzip(filepath.Join(dst, filename), dst)
+				extractedFiles, err = Unzip(filepath.Join(dst, filename), dst)
 				if err != nil {
 					return reqs, fmt.Errorf("error unzipping requirement file %s: %s", filename, err)
 				}
-				log.Printf("unzipped:\n" + strings.Join(files, "\n"))
+				log.Printf("unzipped:\n" + strings.Join(extractedFiles, "\n"))
 
 			}
-			// TODO: remove file after unzipping?
-			log.Printf("about to unlink: %s", filepath.Join(dst, filename))
-			err = os.Remove(filepath.Join(dst, filename))
-			if err != nil {
-				return reqs, fmt.Errorf("error removing unzipped requirement file %s: %s", filename, err)
+
+			for _, extractedFile := range extractedFiles {
+				extractDirName := fmt.Sprintf("/%s", strings.ReplaceAll(filename, ".tar.gz", ""))
+				oldLocation := extractedFile
+				newLocation := strings.ReplaceAll(oldLocation, extractDirName, "")
+				log.Printf("mv %s ==> %s", oldLocation, newLocation)
+				if _, err := os.Stat(newLocation); err == nil {
+					fmt.Printf("Not moving %s; already present at: %s", oldLocation, newLocation)
+				} else if errors.Is(err, os.ErrNotExist) {
+					err = os.Rename(oldLocation, newLocation)
+					// if  .
+					if err != nil && ! os.IsExist(err) {
+						return reqs, fmt.Errorf("error moving module directory after extracting %s: %s", filename, err)
+					}
+				}
+
 			}
 
 		} else {
@@ -266,11 +274,12 @@ func (p *PackageIndex) DownloadFromRequirementsFile(dst, filename string) (reqs 
 
 // Untar takes a destination path and a reader; a tar reader loops over the tarfile
 // creating the file structure at 'dst' along the way, and writing any files
-func Untar(dst string, r io.Reader) error {
+func Untar(dst string, r io.Reader) ([]string, error) {
 
+	var filenames []string
 	gzr, err := gzip.NewReader(r)
 	if err != nil {
-		return err
+		return filenames, err
 	}
 	defer gzr.Close()
 
@@ -283,11 +292,11 @@ func Untar(dst string, r io.Reader) error {
 
 		// if no more files are found return
 		case err == io.EOF:
-			return nil
+			return filenames, nil
 
 		// return any other error
 		case err != nil:
-			return err
+			return filenames, err
 
 		// if the header is nil, just skip it (not sure how this happens)
 		case header == nil:
@@ -296,6 +305,7 @@ func Untar(dst string, r io.Reader) error {
 
 		// the target location where the dir/file should be created
 		target := filepath.Join(dst, header.Name)
+		filenames = append(filenames, target)
 
 		// the following switch could also be done using fi.Mode(), not sure if there
 		// a benefit of using one vs. the other.
@@ -308,7 +318,7 @@ func Untar(dst string, r io.Reader) error {
 		case tar.TypeDir:
 			if _, err := os.Stat(target); err != nil {
 				if err := os.MkdirAll(target, 0755); err != nil {
-					return err
+					return filenames, err
 				}
 			}
 
@@ -316,12 +326,12 @@ func Untar(dst string, r io.Reader) error {
 		case tar.TypeReg:
 			f, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR, os.FileMode(header.Mode))
 			if err != nil {
-				return err
+				return filenames, err
 			}
 
 			// copy over contents
 			if _, err := io.Copy(f, tr); err != nil {
-				return err
+				return filenames, err
 			}
 
 			// manually close here after each file operation; defering would cause each file close
@@ -329,6 +339,7 @@ func Untar(dst string, r io.Reader) error {
 			f.Close()
 		}
 	}
+	return filenames, nil
 }
 
 // Unzip will decompress a zip archive, moving all files and folders

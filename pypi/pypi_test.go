@@ -67,7 +67,7 @@ func TestPypi_DownloadRelease(t *testing.T) {
 func TestPypi_DownloadFromRequirementsFile(t *testing.T) {
 	t.Run("Testing DownloadFromRequirementsFile func", func(t *testing.T) {
 		index := pypi.NewPackageIndex("https://pypi.org")
-		reqs, err := index.DownloadFromRequirementsFile(".", "../test_data/requirements.txt")
+		reqs, err := index.DownloadFromRequirementsFile("../test_data/test_downloads/", "../test_data/requirements.txt")
 		if err != nil {
 			t.Fatalf("error when downloading from requirements: %s", err)
 		}
